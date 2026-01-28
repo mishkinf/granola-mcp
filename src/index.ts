@@ -95,7 +95,9 @@ program
         let transcript: TranscriptUtterance[] | null = null;
         if (options.includeTranscripts) {
           transcript = await getDocumentTranscript(token, doc.id);
-          if (transcript) {
+          // Only write if we got a valid transcript with content
+          // Never overwrite existing local transcripts with empty data
+          if (transcript && transcript.length > 0) {
             await writeFile(
               join(docDir, "transcript.json"),
               JSON.stringify(transcript, null, 2)
@@ -116,8 +118,8 @@ program
             );
             await writeFile(join(docDir, "notes.md"), notesMarkdown);
 
-            // Save transcript as markdown
-            if (transcript) {
+            // Save transcript as markdown (only if we have content)
+            if (transcript && transcript.length > 0) {
               const transcriptMd = transcriptToMarkdown(transcript);
               await writeFile(join(docDir, "transcript.md"), transcriptMd);
 
@@ -673,8 +675,9 @@ program
         );
 
         // Fetch and save transcript
+        // Only write if we get valid content - never overwrite existing with empty
         const transcript = await getDocumentTranscript(token, doc.id);
-        if (transcript) {
+        if (transcript && transcript.length > 0) {
           await writeFile(
             join(docDir, "transcript.json"),
             JSON.stringify(transcript, null, 2)
