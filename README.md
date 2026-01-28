@@ -1,6 +1,6 @@
-# Granola Extractor
+# granola-mcp
 
-CLI tool to extract Granola meeting notes, build a semantic search index, and expose it via MCP for AI assistants.
+MCP server for semantic search across Granola meeting notes. Extracts insights, themes (pain-points, feature-requests, decisions, etc.), and key quotes with speaker attribution. Uses LanceDB for fast local vector search.
 
 Based on reverse engineering research by [Joseph Thacker](https://josephthacker.com/hacking/2025/05/08/reverse-engineering-granola-notes.html) and [getprobo](https://github.com/getprobo/reverse-engineering-granola-api).
 
@@ -107,9 +107,9 @@ Add to `.mcp.json` in your project:
     "granola": {
       "type": "stdio",
       "command": "node",
-      "args": ["/path/to/granola-extractor/dist/mcp/server.js"],
+      "args": ["/path/to/granola-mcp/dist/mcp/server.js"],
       "env": {
-        "GRANOLA_DATA_DIR": "/path/to/granola-extractor/export",
+        "GRANOLA_DATA_DIR": "/path/to/granola-mcp/export",
         "OPENAI_API_KEY": "sk-..."
       }
     }
@@ -126,9 +126,9 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
   "mcpServers": {
     "granola": {
       "command": "node",
-      "args": ["/path/to/granola-extractor/dist/mcp/server.js"],
+      "args": ["/path/to/granola-mcp/dist/mcp/server.js"],
       "env": {
-        "GRANOLA_DATA_DIR": "/path/to/granola-extractor/export",
+        "GRANOLA_DATA_DIR": "/path/to/granola-mcp/export",
         "OPENAI_API_KEY": "sk-..."
       }
     }
