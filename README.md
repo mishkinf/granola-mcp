@@ -28,19 +28,33 @@ npm run build
 ## Quick Start
 
 ```bash
-# 1. Export meetings from Granola
-node dist/index.js export ./export
+# One command to sync everything (export + index)
+OPENAI_API_KEY=sk-... node dist/index.js sync
 
-# 2. Build the search index (extracts insights + creates embeddings)
-OPENAI_API_KEY=sk-... node dist/index.js index ./export
+# Or with a custom data directory
+OPENAI_API_KEY=sk-... node dist/index.js sync ./my-data
 
-# 3. Test search
+# Test search
 OPENAI_API_KEY=sk-... node dist/index.js search "user pain points"
 ```
 
 ## CLI Commands
 
+### Sync (Recommended)
+
+The easiest way to keep your data up to date - exports from Granola and rebuilds the index in one step:
+
+```bash
+OPENAI_API_KEY=sk-... node dist/index.js sync
+
+# With options
+OPENAI_API_KEY=sk-... node dist/index.js sync ./my-data
+OPENAI_API_KEY=sk-... node dist/index.js sync --skip-extraction  # Faster, reuses existing insights
+```
+
 ### Export from Granola
+
+Export only (without indexing):
 
 ```bash
 node dist/index.js export ./output
@@ -167,6 +181,67 @@ export/
 └── Meeting_Title_2/
     └── ...
 ```
+
+## Keeping Data Updated
+
+The system doesn't auto-sync with Granola. Run `sync` manually after new meetings, or set up a cron job:
+
+### Manual Update
+
+```bash
+OPENAI_API_KEY=sk-... node dist/index.js sync
+```
+
+### Automated Updates (Cron)
+
+Add to your crontab (`crontab -e`):
+
+```bash
+# Sync every night at 2am
+0 2 * * * cd /path/to/granola-mcp && OPENAI_API_KEY=sk-... /usr/local/bin/node dist/index.js sync >> /tmp/granola-sync.log 2>&1
+
+# Or every 6 hours
+0 */6 * * * cd /path/to/granola-mcp && OPENAI_API_KEY=sk-... /usr/local/bin/node dist/index.js sync >> /tmp/granola-sync.log 2>&1
+```
+
+### macOS LaunchAgent
+
+Create `~/Library/LaunchAgents/com.granola-mcp.sync.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.granola-mcp.sync</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/node</string>
+        <string>/path/to/granola-mcp/dist/index.js</string>
+        <string>sync</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>OPENAI_API_KEY</key>
+        <string>sk-...</string>
+    </dict>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>2</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/granola-sync.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/granola-sync.log</string>
+</dict>
+</plist>
+```
+
+Load it with: `launchctl load ~/Library/LaunchAgents/com.granola-mcp.sync.plist`
 
 ## How It Works
 

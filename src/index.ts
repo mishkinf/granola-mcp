@@ -613,4 +613,254 @@ program
     }
   });
 
+// SYNC COMMAND - Export from Granola and rebuild index in one step
+program
+  .command("sync")
+  .description("Sync with Granola: export latest data and rebuild search index")
+  .argument("[data-dir]", "Directory for Granola data", "./export")
+  .option("--model <model>", "OpenAI model for insight extraction", "gpt-4o-mini")
+  .option("--skip-extraction", "Skip insight extraction (faster, uses existing insights)")
+  .action(async (dataDir: string, options) => {
+    try {
+      console.log("=== STEP 1: Export from Granola ===\n");
+
+      // Check for OpenAI key first
+      if (!process.env.OPENAI_API_KEY) {
+        console.error("Error: OPENAI_API_KEY environment variable is required");
+        console.error("Set it with: export OPENAI_API_KEY=sk-...");
+        process.exit(1);
+      }
+
+      // Export phase
+      console.log("Loading credentials...");
+      const token = await loadAccessToken();
+
+      console.log("Fetching documents...");
+      const documents = await getAllDocuments(token);
+      console.log(`Found ${documents.length} documents`);
+
+      console.log("Fetching workspaces...");
+      const workspaces = await getWorkspaces(token);
+
+      console.log("Fetching folders...");
+      const folders = await getDocumentLists(token);
+
+      // Create output directory
+      await mkdir(dataDir, { recursive: true });
+
+      // Save metadata files
+      await writeFile(
+        join(dataDir, "workspaces.json"),
+        JSON.stringify(workspaces, null, 2)
+      );
+      await writeFile(
+        join(dataDir, "folders.json"),
+        JSON.stringify(folders, null, 2)
+      );
+
+      const workspaceMap = new Map(workspaces.map((w) => [w.id, w.name]));
+
+      // Process each document
+      let exported = 0;
+      for (const doc of documents) {
+        const docDir = join(dataDir, sanitizeFilename(doc.title || doc.id));
+        await mkdir(docDir, { recursive: true });
+
+        // Save raw document JSON
+        await writeFile(
+          join(docDir, "document.json"),
+          JSON.stringify(doc, null, 2)
+        );
+
+        // Fetch and save transcript
+        const transcript = await getDocumentTranscript(token, doc.id);
+        if (transcript) {
+          await writeFile(
+            join(docDir, "transcript.json"),
+            JSON.stringify(transcript, null, 2)
+          );
+          await writeFile(
+            join(docDir, "transcript.md"),
+            transcriptToMarkdown(transcript)
+          );
+          await writeFile(
+            join(docDir, "transcript.txt"),
+            transcriptToPlainText(transcript)
+          );
+        }
+
+        // Convert and save notes
+        const notesMarkdown = createNotesMarkdown(doc, workspaceMap, folders);
+        await writeFile(join(docDir, "notes.md"), notesMarkdown);
+
+        exported++;
+        process.stdout.write(`\rExported ${exported}/${documents.length} documents`);
+      }
+      console.log("\n");
+
+      // Index phase
+      console.log("=== STEP 2: Build Search Index ===\n");
+
+      const dbPath = join(dataDir, "vectors.lance");
+      console.log(`Building index in ${dbPath}...`);
+
+      // Initialize tables
+      await initializeTables(dbPath);
+
+      // Read exported documents
+      const docDirs = (await readdir(dataDir, { withFileTypes: true }))
+        .filter((d) => d.isDirectory() && !d.name.endsWith(".lance"));
+
+      console.log(`Found ${docDirs.length} document directories`);
+
+      const indexedDocs: Array<{ doc: IndexedDocument; summaryVector: number[] }> = [];
+      const allChunks: ChunkRecord[] = [];
+
+      let processed = 0;
+      for (const dir of docDirs) {
+        const docPath = join(dataDir, dir.name, "document.json");
+        const notesPath = join(dataDir, dir.name, "notes.md");
+        const transcriptJsonPath = join(dataDir, dir.name, "transcript.json");
+        const transcriptPath = join(dataDir, dir.name, "transcript.txt");
+
+        if (!existsSync(docPath)) continue;
+
+        // Load document data
+        const docJson = JSON.parse(await readFile(docPath, "utf-8")) as GranolaDocument;
+
+        // Load notes
+        let notes = "";
+        if (existsSync(notesPath)) {
+          const notesContent = await readFile(notesPath, "utf-8");
+          notes = notesContent.replace(/^---[\s\S]*?---\n*/, "");
+        }
+
+        // Load transcript with speaker attribution
+        let transcript = "";
+        const hasTranscript = existsSync(transcriptJsonPath) || existsSync(transcriptPath);
+        if (existsSync(transcriptJsonPath)) {
+          const transcriptJson = JSON.parse(await readFile(transcriptJsonPath, "utf-8")) as TranscriptUtterance[];
+          if (transcriptJson && transcriptJson.length > 0) {
+            transcript = transcriptWithSpeakers(transcriptJson);
+          }
+        } else if (existsSync(transcriptPath)) {
+          transcript = await readFile(transcriptPath, "utf-8");
+        }
+
+        // Extract folders
+        const docFolders: string[] = [];
+        if (existsSync(notesPath)) {
+          const notesContent = await readFile(notesPath, "utf-8");
+          const folderMatch = notesContent.match(/folders:\s*\[(.*?)\]/);
+          if (folderMatch) {
+            const folderStr = folderMatch[1];
+            const folderMatches = folderStr.match(/"([^"]+)"/g);
+            if (folderMatches) {
+              docFolders.push(...folderMatches.map((f) => f.replace(/"/g, "")));
+            }
+          }
+        }
+
+        // Extract insights
+        let insights = {
+          insights_summary: notes.substring(0, 500) || "No summary available",
+          themes: [] as Theme[],
+          key_quotes: [] as Quote[],
+        };
+
+        if (!options.skipExtraction && (transcript || notes)) {
+          console.log(`Extracting insights for: ${docJson.title || dir.name}`);
+          insights = await extractInsights(
+            transcript,
+            notes,
+            docJson.title || dir.name,
+            options.model
+          );
+        }
+
+        // Create indexed document
+        const indexedDoc: IndexedDocument = {
+          id: docJson.id,
+          title: docJson.title || dir.name,
+          folders: docFolders,
+          created_at: docJson.created_at,
+          updated_at: docJson.updated_at,
+          granola_summary: notes,
+          themes: insights.themes,
+          key_quotes: insights.key_quotes,
+          insights_summary: insights.insights_summary,
+          has_transcript: hasTranscript,
+        };
+
+        // Generate embeddings
+        const summaryText = createSearchableText({
+          type: "summary",
+          text: insights.insights_summary,
+        });
+        const summaryVector = await generateEmbedding(summaryText);
+
+        indexedDocs.push({ doc: indexedDoc, summaryVector });
+
+        // Create chunks for themes
+        for (const theme of insights.themes) {
+          const evidenceTexts = theme.evidence.map(e =>
+            `[${e.speaker === 'me' ? 'ME' : 'PARTICIPANT'}] ${e.text}`
+          );
+          const themeText = createSearchableText({
+            type: "theme",
+            text: `${theme.description}. Evidence: ${evidenceTexts.join(" | ")}`,
+            theme_name: theme.name,
+          });
+          const themeVector = await generateEmbedding(themeText);
+          allChunks.push({
+            id: `${docJson.id}_theme_${theme.name}`,
+            document_id: docJson.id,
+            content: theme.description,
+            type: "theme",
+            theme_name: theme.name,
+            vector: themeVector,
+          });
+        }
+
+        // Create chunks for quotes
+        for (let i = 0; i < insights.key_quotes.length; i++) {
+          const quote = insights.key_quotes[i];
+          const quoteText = createSearchableText({
+            type: "quote",
+            text: quote.text,
+            context: quote.context,
+          });
+          const quoteVector = await generateEmbedding(quoteText);
+          allChunks.push({
+            id: `${docJson.id}_quote_${i}`,
+            document_id: docJson.id,
+            content: quote.text,
+            type: "quote",
+            timestamp: quote.timestamp,
+            vector: quoteVector,
+          });
+        }
+
+        processed++;
+        console.log(`Processed ${processed}/${docDirs.length}`);
+      }
+
+      // Store in vector database
+      console.log("\nStoring in vector database...");
+      await storeDocuments(dbPath, indexedDocs);
+      await storeChunks(dbPath, allChunks);
+
+      console.log(`
+Sync complete!
+- Documents exported: ${exported}
+- Documents indexed: ${indexedDocs.length}
+- Chunks created: ${allChunks.length}
+- Database: ${dbPath}
+`);
+    } catch (error) {
+      console.error("Error:", (error as Error).message);
+      process.exit(1);
+    }
+  });
+
 program.parse();
