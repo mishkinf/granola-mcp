@@ -1,16 +1,31 @@
 {
-  "name": "granola-extractor",
+  "name": "granola-mcp",
   "version": "1.0.0",
-  "description": "CLI tool to extract Granola meeting notes and transcripts",
+  "description": "MCP server for semantic search across Granola meeting notes with speaker attribution and theme extraction",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "granola-extract": "./dist/index.js"
+    "granola-mcp": "./dist/index.js"
   },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsx src/index.ts"
+    "dev": "tsx src/index.ts",
+    "mcp": "node dist/mcp/server.js"
+  },
+  "keywords": [
+    "granola",
+    "mcp",
+    "model-context-protocol",
+    "meeting-notes",
+    "transcription",
+    "semantic-search",
+    "claude",
+    "ai"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "@lancedb/lancedb": "^0.23.0",
