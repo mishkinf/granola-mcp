@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment files
+.env
+.env.local
+.env*.local
+
+# MCP config (contains API keys)
+.mcp.json
+
+# Generated exports
+chatgpt-export.md
+
+# Exported data (contains personal meeting data)
+export/
+
+# Vector database
+*.lance/
+
+# OS files
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*

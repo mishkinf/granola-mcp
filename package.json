@@ -1,0 +1,28 @@
+{
+  "name": "granola-extractor",
+  "version": "1.0.0",
+  "description": "CLI tool to extract Granola meeting notes and transcripts",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "granola-extract": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@lancedb/lancedb": "^0.23.0",
+    "@modelcontextprotocol/sdk": "^1.25.3",
+    "apache-arrow": "^18.1.0",
+    "commander": "^12.1.0",
+    "openai": "^6.16.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
