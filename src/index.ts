@@ -32,6 +32,8 @@ import {
   searchDocuments,
   getAllDocuments as getAllIndexedDocuments,
   getThemeStats,
+  getIndexedDocumentIds,
+  indexExists,
   THEMES,
 } from "./indexing/index.js";
 import type { IndexedDocument, ChunkRecord, Quote, Theme } from "./types.js";
@@ -622,6 +624,7 @@ program
   .argument("[data-dir]", "Directory for Granola data", "./export")
   .option("--model <model>", "OpenAI model for insight extraction", "gpt-4o-mini")
   .option("--skip-extraction", "Skip insight extraction (faster, uses existing insights)")
+  .option("--force", "Force reprocessing of all documents (ignore existing index)")
   .action(async (dataDir: string, options) => {
     try {
       console.log("=== STEP 1: Export from Granola ===\n");
@@ -696,6 +699,15 @@ program
         const notesMarkdown = createNotesMarkdown(doc, workspaceMap, folders);
         await writeFile(join(docDir, "notes.md"), notesMarkdown);
 
+        // Create combined markdown file (notes + transcript)
+        const combinedParts: string[] = [notesMarkdown];
+        if (transcript && transcript.length > 0) {
+          combinedParts.push("\n---\n");
+          combinedParts.push("## Transcript\n");
+          combinedParts.push(transcriptToMarkdown(transcript));
+        }
+        await writeFile(join(docDir, "combined.md"), combinedParts.join("\n"));
+
         exported++;
         process.stdout.write(`\rExported ${exported}/${documents.length} documents`);
       }
@@ -707,8 +719,17 @@ program
       const dbPath = join(dataDir, "vectors.lance");
       console.log(`Building index in ${dbPath}...`);
 
-      // Initialize tables
-      await initializeTables(dbPath);
+      // Check for existing indexed documents (for incremental sync)
+      let existingDocIds = new Set<string>();
+      const hasExistingIndex = await indexExists(dbPath);
+
+      if (hasExistingIndex && !options.force) {
+        existingDocIds = await getIndexedDocumentIds(dbPath);
+        console.log(`Found ${existingDocIds.size} already-indexed documents`);
+      } else if (options.force) {
+        console.log("Force mode: reprocessing all documents");
+        await initializeTables(dbPath, { dropExisting: true });
+      }
 
       // Read exported documents
       const docDirs = (await readdir(dataDir, { withFileTypes: true }))
@@ -720,6 +741,7 @@ program
       const allChunks: ChunkRecord[] = [];
 
       let processed = 0;
+      let skipped = 0;
       for (const dir of docDirs) {
         const docPath = join(dataDir, dir.name, "document.json");
         const notesPath = join(dataDir, dir.name, "notes.md");
@@ -730,6 +752,12 @@ program
 
         // Load document data
         const docJson = JSON.parse(await readFile(docPath, "utf-8")) as GranolaDocument;
+
+        // Skip if already indexed (incremental sync)
+        if (existingDocIds.has(docJson.id)) {
+          skipped++;
+          continue;
+        }
 
         // Load notes
         let notes = "";
@@ -845,18 +873,21 @@ program
         }
 
         processed++;
-        console.log(`Processed ${processed}/${docDirs.length}`);
+        console.log(`Processed ${processed}/${docDirs.length - skipped} new documents`);
       }
 
-      // Store in vector database
-      console.log("\nStoring in vector database...");
-      await storeDocuments(dbPath, indexedDocs);
-      await storeChunks(dbPath, allChunks);
+      // Store in vector database (append if incremental)
+      const useAppend = hasExistingIndex && !options.force;
+      if (indexedDocs.length > 0) {
+        console.log("\nStoring in vector database...");
+        await storeDocuments(dbPath, indexedDocs, { append: useAppend });
+        await storeChunks(dbPath, allChunks, { append: useAppend });
+      }
 
       console.log(`
 Sync complete!
 - Documents exported: ${exported}
-- Documents indexed: ${indexedDocs.length}
+- Documents indexed: ${indexedDocs.length} new${skipped > 0 ? ` (${skipped} already indexed, skipped)` : ""}
 - Chunks created: ${allChunks.length}
 - Database: ${dbPath}
 `);

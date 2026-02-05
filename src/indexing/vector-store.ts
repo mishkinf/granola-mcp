@@ -36,16 +36,18 @@ export async function indexExists(dbPath: string): Promise<boolean> {
 }
 
 // Initialize or recreate tables
-export async function initializeTables(dbPath: string): Promise<void> {
+export async function initializeTables(dbPath: string, options: { dropExisting?: boolean } = {}): Promise<void> {
   const database = await getDatabase(dbPath);
   const existingTables = await database.tableNames();
 
-  // Drop existing tables if they exist
-  if (existingTables.includes(DOCUMENTS_TABLE)) {
-    await database.dropTable(DOCUMENTS_TABLE);
-  }
-  if (existingTables.includes(CHUNKS_TABLE)) {
-    await database.dropTable(CHUNKS_TABLE);
+  // Drop existing tables if requested
+  if (options.dropExisting) {
+    if (existingTables.includes(DOCUMENTS_TABLE)) {
+      await database.dropTable(DOCUMENTS_TABLE);
+    }
+    if (existingTables.includes(CHUNKS_TABLE)) {
+      await database.dropTable(CHUNKS_TABLE);
+    }
   }
 }
 
@@ -55,8 +57,11 @@ export async function storeDocuments(
   documents: Array<{
     doc: IndexedDocument;
     summaryVector: number[];
-  }>
+  }>,
+  options: { append?: boolean } = {}
 ): Promise<void> {
+  if (documents.length === 0) return;
+
   const database = await getDatabase(dbPath);
 
   const records = documents.map(({ doc, summaryVector }) => ({
@@ -72,15 +77,26 @@ export async function storeDocuments(
     vector: summaryVector,
   }));
 
-  // Create or overwrite table
-  await database.createTable(DOCUMENTS_TABLE, records, { mode: 'overwrite' });
+  const existingTables = await database.tableNames();
+
+  if (options.append && existingTables.includes(DOCUMENTS_TABLE)) {
+    // Append to existing table
+    const table = await database.openTable(DOCUMENTS_TABLE);
+    await table.add(records);
+  } else {
+    // Create or overwrite table
+    await database.createTable(DOCUMENTS_TABLE, records, { mode: 'overwrite' });
+  }
 }
 
 // Store chunks for detailed search
 export async function storeChunks(
   dbPath: string,
-  chunks: ChunkRecord[]
+  chunks: ChunkRecord[],
+  options: { append?: boolean } = {}
 ): Promise<void> {
+  if (chunks.length === 0) return;
+
   const database = await getDatabase(dbPath);
 
   const records = chunks.map(chunk => ({
@@ -93,8 +109,16 @@ export async function storeChunks(
     vector: chunk.vector,
   }));
 
-  // Create or overwrite table
-  await database.createTable(CHUNKS_TABLE, records, { mode: 'overwrite' });
+  const existingTables = await database.tableNames();
+
+  if (options.append && existingTables.includes(CHUNKS_TABLE)) {
+    // Append to existing table
+    const table = await database.openTable(CHUNKS_TABLE);
+    await table.add(records);
+  } else {
+    // Create or overwrite table
+    await database.createTable(CHUNKS_TABLE, records, { mode: 'overwrite' });
+  }
 }
 
 // Search documents by semantic similarity
@@ -309,6 +333,26 @@ export async function getThemeStats(
   }
 
   return stats;
+}
+
+// Get all indexed document IDs (for incremental sync)
+export async function getIndexedDocumentIds(
+  dbPath: string
+): Promise<Set<string>> {
+  const database = await getDatabase(dbPath);
+  const ids = new Set<string>();
+
+  try {
+    const table = await database.openTable(DOCUMENTS_TABLE);
+    const results = await table.query().select(['id']).toArray();
+    for (const row of results) {
+      ids.add(row.id as string);
+    }
+  } catch (error) {
+    // Table doesn't exist yet, return empty set
+  }
+
+  return ids;
 }
 
 // Get all unique folders

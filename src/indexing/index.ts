@@ -14,4 +14,5 @@ export {
   getDocumentById,
   getThemeStats,
   getAllFolders,
+  getIndexedDocumentIds,
 } from './vector-store.js';
