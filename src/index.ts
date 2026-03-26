@@ -3,6 +3,7 @@
 import { Command } from "commander";
 import { mkdir, writeFile, readFile, readdir } from "fs/promises";
 import { existsSync } from "fs";
+import { writeFileIfChanged } from "./write-stable.js";
 import { join } from "path";
 import { loadAccessToken } from "./credentials.js";
 import {
@@ -72,11 +73,11 @@ program
       await mkdir(outputDir, { recursive: true });
 
       // Save metadata files
-      await writeFile(
+      await writeFileIfChanged(
         join(outputDir, "workspaces.json"),
         JSON.stringify(workspaces, null, 2)
       );
-      await writeFile(
+      await writeFileIfChanged(
         join(outputDir, "folders.json"),
         JSON.stringify(folders, null, 2)
       );
@@ -88,7 +89,7 @@ program
         await mkdir(docDir, { recursive: true });
 
         // Save raw document JSON
-        await writeFile(
+        await writeFileIfChanged(
           join(docDir, "document.json"),
           JSON.stringify(doc, null, 2)
         );
@@ -100,7 +101,7 @@ program
           // Only write if we got a valid transcript with content
           // Never overwrite existing local transcripts with empty data
           if (transcript && transcript.length > 0) {
-            await writeFile(
+            await writeFileIfChanged(
               join(docDir, "transcript.json"),
               JSON.stringify(transcript, null, 2)
             );
@@ -118,16 +119,16 @@ program
               workspaceMap,
               folders
             );
-            await writeFile(join(docDir, "notes.md"), notesMarkdown);
+            await writeFileIfChanged(join(docDir, "notes.md"), notesMarkdown);
 
             // Save transcript as markdown (only if we have content)
             if (transcript && transcript.length > 0) {
               const transcriptMd = transcriptToMarkdown(transcript);
-              await writeFile(join(docDir, "transcript.md"), transcriptMd);
+              await writeFileIfChanged(join(docDir, "transcript.md"), transcriptMd);
 
               // Save plain text transcript
               const plainText = transcriptToPlainText(transcript);
-              await writeFile(join(docDir, "transcript.txt"), plainText);
+              await writeFileIfChanged(join(docDir, "transcript.txt"), plainText);
             }
           }
         }
@@ -256,7 +257,6 @@ function createNotesMarkdown(
     `granola_id: ${doc.id}`,
     `title: "${(doc.title || "Untitled").replace(/"/g, '\\"')}"`,
     `created_at: ${doc.created_at}`,
-    `updated_at: ${doc.updated_at}`,
   ];
 
   if (doc.workspace_id) {
@@ -654,11 +654,11 @@ program
       await mkdir(dataDir, { recursive: true });
 
       // Save metadata files
-      await writeFile(
+      await writeFileIfChanged(
         join(dataDir, "workspaces.json"),
         JSON.stringify(workspaces, null, 2)
       );
-      await writeFile(
+      await writeFileIfChanged(
         join(dataDir, "folders.json"),
         JSON.stringify(folders, null, 2)
       );
@@ -672,7 +672,7 @@ program
         await mkdir(docDir, { recursive: true });
 
         // Save raw document JSON
-        await writeFile(
+        await writeFileIfChanged(
           join(docDir, "document.json"),
           JSON.stringify(doc, null, 2)
         );
@@ -681,15 +681,15 @@ program
         // Only write if we get valid content - never overwrite existing with empty
         const transcript = await getDocumentTranscript(token, doc.id);
         if (transcript && transcript.length > 0) {
-          await writeFile(
+          await writeFileIfChanged(
             join(docDir, "transcript.json"),
             JSON.stringify(transcript, null, 2)
           );
-          await writeFile(
+          await writeFileIfChanged(
             join(docDir, "transcript.md"),
             transcriptToMarkdown(transcript)
           );
-          await writeFile(
+          await writeFileIfChanged(
             join(docDir, "transcript.txt"),
             transcriptToPlainText(transcript)
           );
@@ -697,7 +697,7 @@ program
 
         // Convert and save notes
         const notesMarkdown = createNotesMarkdown(doc, workspaceMap, folders);
-        await writeFile(join(docDir, "notes.md"), notesMarkdown);
+        await writeFileIfChanged(join(docDir, "notes.md"), notesMarkdown);
 
         // Create combined markdown file (notes + transcript)
         const combinedParts: string[] = [notesMarkdown];
@@ -706,7 +706,7 @@ program
           combinedParts.push("## Transcript\n");
           combinedParts.push(transcriptToMarkdown(transcript));
         }
-        await writeFile(join(docDir, "combined.md"), combinedParts.join("\n"));
+        await writeFileIfChanged(join(docDir, "combined.md"), combinedParts.join("\n"));
 
         exported++;
         process.stdout.write(`\rExported ${exported}/${documents.length} documents`);
