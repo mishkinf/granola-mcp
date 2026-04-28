@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from "commander";
-import { mkdir, writeFile, readFile, readdir } from "fs/promises";
+import { mkdir, writeFile, readFile, readdir, rm, stat } from "fs/promises";
 import { existsSync } from "fs";
 import { writeFileIfChanged } from "./write-stable.js";
 import { join } from "path";
@@ -53,6 +53,8 @@ program
   .option("--include-transcripts", "Include raw transcripts", true)
   .option("--format <format>", "Output format: markdown, json, or both", "both")
   .option("--raw-only", "Export only raw JSON data without conversion")
+  .option("--force-lore", "Overwrite existing Lore projection files")
+  .option("--prune-lore", "Delete Lore projection files whose Granola document no longer appears")
   .action(async (outputDir: string, options) => {
     try {
       console.log("Loading credentials...");
@@ -68,6 +70,8 @@ program
 
       console.log("Fetching folders...");
       const folders = await getDocumentLists(token);
+      const activeLoreFiles = new Set<string>();
+      const loreProjection = createLoreProjectionStats();
 
       // Create output directory
       await mkdir(outputDir, { recursive: true });
@@ -133,12 +137,105 @@ program
           }
         }
 
+        if (!options.rawOnly) {
+          await writeLoreProjection(
+            outputDir,
+            doc,
+            workspaceMap,
+            folders,
+            transcript,
+            activeLoreFiles,
+            loreProjection,
+            { overwrite: options.forceLore === true }
+          );
+        }
+
         processed++;
         process.stdout.write(`\rProcessed ${processed}/${documents.length}`);
       }
 
+      if (!options.rawOnly) {
+        if (options.pruneLore === true) {
+          loreProjection.pruned = await cleanupStaleLoreProjection(join(outputDir, "lore"), activeLoreFiles);
+        }
+        console.log(formatLoreProjectionStats(loreProjection));
+      }
+
       console.log("\n\nExport complete!");
       console.log(`Output directory: ${outputDir}`);
+    } catch (error) {
+      console.error("Error:", (error as Error).message);
+      process.exit(1);
+    }
+  });
+
+program
+  .command("export-lore")
+  .description("Build a stable Lore-ready markdown projection from an existing export directory")
+  .argument("[data-dir]", "Directory containing exported Granola data", "./export")
+  .option("--force", "Overwrite existing Lore projection files")
+  .option("--prune", "Delete Lore projection files whose Granola document no longer appears")
+  .action(async (dataDir: string, options) => {
+    try {
+      const workspacesPath = join(dataDir, "workspaces.json");
+      const foldersPath = join(dataDir, "folders.json");
+      const workspaces = existsSync(workspacesPath)
+        ? (JSON.parse(await readFile(workspacesPath, "utf-8")) as Workspace[])
+        : [];
+      const folders = existsSync(foldersPath)
+        ? (JSON.parse(await readFile(foldersPath, "utf-8")) as DocumentList[])
+        : [];
+      const workspaceMap = new Map(workspaces.map((w) => [w.id, w.name]));
+
+      const entries = await readdir(dataDir, { withFileTypes: true });
+      const latestById = new Map<
+        string,
+        { doc: GranolaDocument; transcript: TranscriptUtterance[] | null; modifiedAt: number }
+      >();
+
+      for (const dir of entries) {
+        if (!dir.isDirectory() || dir.name === "lore" || dir.name.endsWith(".lance")) {
+          continue;
+        }
+
+        const docPath = join(dataDir, dir.name, "document.json");
+        if (!existsSync(docPath)) continue;
+
+        const doc = JSON.parse(await readFile(docPath, "utf-8")) as GranolaDocument;
+        const docStat = await stat(docPath);
+        const existing = latestById.get(doc.id);
+        if (existing && existing.modifiedAt >= docStat.mtimeMs) {
+          continue;
+        }
+
+        const transcriptPath = join(dataDir, dir.name, "transcript.json");
+        const transcript = existsSync(transcriptPath)
+          ? (JSON.parse(await readFile(transcriptPath, "utf-8")) as TranscriptUtterance[])
+          : null;
+
+        latestById.set(doc.id, { doc, transcript, modifiedAt: docStat.mtimeMs });
+      }
+
+      const activeLoreFiles = new Set<string>();
+      const loreProjection = createLoreProjectionStats();
+      for (const { doc, transcript } of latestById.values()) {
+        await writeLoreProjection(
+          dataDir,
+          doc,
+          workspaceMap,
+          folders,
+          transcript,
+          activeLoreFiles,
+          loreProjection,
+          { overwrite: options.force === true }
+        );
+      }
+      if (options.prune === true) {
+        loreProjection.pruned = await cleanupStaleLoreProjection(join(dataDir, "lore"), activeLoreFiles);
+      }
+
+      console.log(`Lore projection complete: ${latestById.size} document(s) in ${join(dataDir, "lore")}`);
+      console.log(formatLoreProjectionStats(loreProjection));
     } catch (error) {
       console.error("Error:", (error as Error).message);
       process.exit(1);
@@ -247,15 +344,37 @@ function sanitizeFilename(name: string): string {
     .slice(0, 100);
 }
 
-function createNotesMarkdown(
+function quoteYaml(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+function getDocumentFolders(doc: GranolaDocument, folders: DocumentList[]): string[] {
+  const docFolders = folders.filter(
+    (f) =>
+      f.document_ids?.includes(doc.id) ||
+      f.documents?.some((d) => d.id === doc.id)
+  );
+
+  return docFolders.map((f) => f.title || f.name || "Untitled");
+}
+
+function createDocumentFrontmatter(
   doc: GranolaDocument,
   workspaceMap: Map<string, string>,
-  folders: DocumentList[]
-): string {
+  folders: DocumentList[],
+  options: { loreReady?: boolean } = {}
+): string[] {
   const frontmatter = [
     "---",
+    ...(options.loreReady
+      ? [
+          `source_id: ${quoteYaml(`granola:${doc.id}`)}`,
+          `source_type: "granola"`,
+          `source_date: ${doc.created_at}`,
+        ]
+      : []),
     `granola_id: ${doc.id}`,
-    `title: "${(doc.title || "Untitled").replace(/"/g, '\\"')}"`,
+    `title: ${quoteYaml(doc.title || "Untitled")}`,
     `created_at: ${doc.created_at}`,
   ];
 
@@ -263,26 +382,135 @@ function createNotesMarkdown(
     frontmatter.push(`workspace_id: ${doc.workspace_id}`);
     const workspaceName = workspaceMap.get(doc.workspace_id);
     if (workspaceName) {
-      frontmatter.push(`workspace_name: "${workspaceName}"`);
+      frontmatter.push(`workspace_name: ${quoteYaml(workspaceName)}`);
     }
   }
 
-  // Find folders containing this document
-  const docFolders = folders.filter(
-    (f) =>
-      f.document_ids?.includes(doc.id) ||
-      f.documents?.some((d) => d.id === doc.id)
-  );
-  if (docFolders.length > 0) {
-    const folderNames = docFolders.map((f) => f.title || f.name || "Untitled");
-    frontmatter.push(`folders: [${folderNames.map((n) => `"${n}"`).join(", ")}]`);
+  const folderNames = getDocumentFolders(doc, folders);
+  if (folderNames.length > 0) {
+    frontmatter.push(`folders: [${folderNames.map(quoteYaml).join(", ")}]`);
   }
 
-  frontmatter.push("---\n");
+  frontmatter.push("---");
+  return frontmatter;
+}
 
+function createNotesMarkdown(
+  doc: GranolaDocument,
+  workspaceMap: Map<string, string>,
+  folders: DocumentList[]
+): string {
   const content = proseMirrorToMarkdown(doc.last_viewed_panel?.content);
+  const frontmatter = createDocumentFrontmatter(doc, workspaceMap, folders);
 
-  return frontmatter.join("\n") + "\n" + content;
+  return frontmatter.join("\n") + "\n\n" + content;
+}
+
+function createLoreMarkdown(
+  doc: GranolaDocument,
+  workspaceMap: Map<string, string>,
+  folders: DocumentList[],
+  transcript: TranscriptUtterance[] | null
+): string {
+  const title = doc.title || "Untitled";
+  const notes = proseMirrorToMarkdown(doc.last_viewed_panel?.content).trim();
+  const parts = [
+    createDocumentFrontmatter(doc, workspaceMap, folders, { loreReady: true }).join("\n"),
+    "",
+    `# ${title}`,
+    "",
+    "## Notes",
+    "",
+    notes || "_No notes captured._",
+  ];
+
+  if (transcript && transcript.length > 0) {
+    parts.push("", "## Transcript", "", createLoreTranscriptMarkdown(transcript));
+  }
+
+  return parts.join("\n");
+}
+
+function createLoreTranscriptMarkdown(transcript: TranscriptUtterance[]): string {
+  return transcriptToMarkdown(transcript)
+    .replace(/^# Transcript\s*/u, "")
+    .trim();
+}
+
+async function cleanupStaleLoreProjection(loreDir: string, activeFiles: Set<string>): Promise<number> {
+  if (!existsSync(loreDir)) return 0;
+
+  let pruned = 0;
+  const entries = await readdir(loreDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+    if (activeFiles.has(entry.name)) continue;
+    await rm(join(loreDir, entry.name));
+    pruned++;
+  }
+
+  return pruned;
+}
+
+interface LoreProjectionStats {
+  created: number;
+  updated: number;
+  unchanged: number;
+  preserved: number;
+  pruned: number;
+}
+
+function createLoreProjectionStats(): LoreProjectionStats {
+  return {
+    created: 0,
+    updated: 0,
+    unchanged: 0,
+    preserved: 0,
+    pruned: 0,
+  };
+}
+
+function formatLoreProjectionStats(stats: LoreProjectionStats): string {
+  return [
+    "Lore projection:",
+    `${stats.created} created`,
+    `${stats.updated} updated`,
+    `${stats.unchanged} unchanged`,
+    `${stats.preserved} preserved`,
+    `${stats.pruned} pruned`,
+  ].join(" ");
+}
+
+async function writeLoreProjection(
+  dataDir: string,
+  doc: GranolaDocument,
+  workspaceMap: Map<string, string>,
+  folders: DocumentList[],
+  transcript: TranscriptUtterance[] | null,
+  activeFiles: Set<string>,
+  stats: LoreProjectionStats,
+  options: { overwrite?: boolean } = {}
+): Promise<void> {
+  const loreDir = join(dataDir, "lore");
+  await mkdir(loreDir, { recursive: true });
+
+  const filename = `${doc.id}.md`;
+  activeFiles.add(filename);
+  const filePath = join(loreDir, filename);
+
+  if (existsSync(filePath) && !options.overwrite) {
+    stats.preserved++;
+    return;
+  }
+
+  const written = await writeFileIfChanged(filePath, createLoreMarkdown(doc, workspaceMap, folders, transcript));
+  if (!written) {
+    stats.unchanged++;
+  } else if (options.overwrite) {
+    stats.updated++;
+  } else {
+    stats.created++;
+  }
 }
 
 // INDEX COMMAND - Build vector index with insight extraction
@@ -625,6 +853,8 @@ program
   .option("--model <model>", "OpenAI model for insight extraction", "gpt-4o-mini")
   .option("--skip-extraction", "Skip insight extraction (faster, uses existing insights)")
   .option("--force", "Force reprocessing of all documents (ignore existing index)")
+  .option("--force-lore", "Overwrite existing Lore projection files")
+  .option("--prune-lore", "Delete Lore projection files whose Granola document no longer appears")
   .action(async (dataDir: string, options) => {
     try {
       console.log("=== STEP 1: Export from Granola ===\n");
@@ -664,6 +894,8 @@ program
       );
 
       const workspaceMap = new Map(workspaces.map((w) => [w.id, w.name]));
+      const activeLoreFiles = new Set<string>();
+      const loreProjection = createLoreProjectionStats();
 
       // Process each document
       let exported = 0;
@@ -707,11 +939,25 @@ program
           combinedParts.push(transcriptToMarkdown(transcript));
         }
         await writeFileIfChanged(join(docDir, "combined.md"), combinedParts.join("\n"));
+        await writeLoreProjection(
+          dataDir,
+          doc,
+          workspaceMap,
+          folders,
+          transcript,
+          activeLoreFiles,
+          loreProjection,
+          { overwrite: options.forceLore === true }
+        );
 
         exported++;
         process.stdout.write(`\rExported ${exported}/${documents.length} documents`);
       }
+      if (options.pruneLore === true) {
+        loreProjection.pruned = await cleanupStaleLoreProjection(join(dataDir, "lore"), activeLoreFiles);
+      }
       console.log("\n");
+      console.log(formatLoreProjectionStats(loreProjection));
 
       // Index phase
       console.log("=== STEP 2: Build Search Index ===\n");
